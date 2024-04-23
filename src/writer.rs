@@ -229,6 +229,23 @@ impl<W: Write> Writer<W> {
         result
     }
 
+    /// Increases the indentation level.
+    #[inline]
+    pub fn grow_indent(&mut self) {
+        if let Some(i) = self.indent.as_mut() {
+            i.grow();
+        }
+    }
+
+    /// Decreases the indentation level.
+    #[inline]
+    pub fn shrink_indent(&mut self) {
+        if let Some(i) = self.indent.as_mut() {
+            i.shrink();
+        }
+    }
+
+
     /// Writes bytes
     #[inline]
     pub(crate) fn write(&mut self, value: &[u8]) -> Result<()> {

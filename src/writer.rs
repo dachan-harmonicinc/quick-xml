@@ -84,6 +84,15 @@ impl<W> Writer<W> {
         }
     }
 
+    /// Creates a `Writer` with configured prefix and indents from a generic writer.
+    /// IMPORTANT: The prefix should be less than 64 bytes; It only works correctly in write_serializable method.
+    pub fn new_with_prefix_and_indent(inner: W, prefix: &str, indent_char: u8, indent_size: usize) -> Writer<W> {
+        Writer {
+            writer: inner,
+            indent: Some(Indentation::new_with_prefix(prefix, indent_char, indent_size)),
+        }
+    }
+
     /// Consumes this `Writer`, returning the underlying writer.
     pub fn into_inner(self) -> W {
         self.writer
@@ -472,6 +481,20 @@ impl Indentation {
         }
     }
 
+    pub fn new_with_prefix(prefix: &str, indent_char: u8, indent_size: usize) -> Self {
+        let prefix_len = prefix.len();
+        assert!(prefix_len < 64);
+        let mut indents = vec![indent_char; 128];
+        indents[..prefix_len].copy_from_slice(prefix.as_bytes());
+        Self {
+            should_line_break: false,
+            indent_char,
+            indent_size,
+            indents: indents,
+            current_indent_len: prefix_len, // invariant - needs to remain less than indents.len()
+        }
+    }
+
     /// Increase indentation by one level
     pub fn grow(&mut self) {
         self.current_indent_len += self.indent_size;
@@ -720,6 +743,60 @@ mod indentation {
         <val>foo</val>
     </foo_element>
 </paired>"#
+        );
+    }
+
+    #[cfg(feature = "serialize")]
+    #[test]
+    fn serializable_with_prefix() {
+        #[derive(Serialize)]
+        struct Foo {
+            #[serde(rename = "@attribute")]
+            attribute: &'static str,
+
+            element: Bar,
+            list: Vec<&'static str>,
+
+            #[serde(rename = "$text")]
+            text: &'static str,
+
+            val: String,
+        }
+
+        #[derive(Serialize)]
+        struct Bar {
+            baz: usize,
+            bat: usize,
+        }
+
+        let mut buffer = Vec::new();
+        let mut writer = Writer::new_with_prefix_and_indent(&mut buffer, "ABC", b' ', 4);
+
+        let content = Foo {
+            attribute: "attribute",
+            element: Bar { baz: 42, bat: 43 },
+            list: vec!["first element", "second element"],
+            text: "text",
+            val: "foo".to_owned(),
+        };
+
+        writer
+            .write_serializable("foo_element", &content)
+            .expect("write serializable inner contents failed");
+
+        assert_eq!(
+            std::str::from_utf8(&buffer).unwrap(),
+            r#"
+ABC<foo_element attribute="attribute">
+ABC    <element>
+ABC        <baz>42</baz>
+ABC        <bat>43</bat>
+ABC    </element>
+ABC    <list>first element</list>
+ABC    <list>second element</list>
+ABC    text
+ABC    <val>foo</val>
+ABC</foo_element>"#
         );
     }
 

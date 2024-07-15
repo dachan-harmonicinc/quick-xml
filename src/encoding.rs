@@ -62,7 +62,7 @@ impl Decoder {
     ///
     /// [`decode`]: Self::decode
     #[cfg(feature = "encoding")]
-    pub fn encoding(&self) -> &'static Encoding {
+    pub const fn encoding(&self) -> &'static Encoding {
         self.encoding
     }
 
@@ -98,6 +98,15 @@ impl Decoder {
         decode_into(bytes, self.encoding, buf)?;
 
         Ok(())
+    }
+
+    /// Decodes the `Cow` buffer, preserves the lifetime
+    pub(crate) fn decode_cow<'b>(&self, bytes: &Cow<'b, [u8]>) -> Result<Cow<'b, str>> {
+        match bytes {
+            Cow::Borrowed(bytes) => self.decode(bytes),
+            // Convert to owned, because otherwise Cow will be bound with wrong lifetime
+            Cow::Owned(bytes) => Ok(self.decode(bytes)?.into_owned().into()),
+        }
     }
 }
 

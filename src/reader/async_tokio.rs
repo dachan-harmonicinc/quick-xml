@@ -7,10 +7,10 @@ use tokio::io::{self, AsyncBufRead, AsyncBufReadExt};
 use crate::errors::{Error, Result, SyntaxError};
 use crate::events::Event;
 use crate::name::{QName, ResolveResult};
+use crate::parser::{ElementParser, Parser, PiParser};
 use crate::reader::buffered_reader::impl_buffered_source;
-use crate::reader::{
-    is_whitespace, BangType, NsReader, ParseState, ReadElementState, Reader, Span,
-};
+use crate::reader::{BangType, NsReader, ParseState, ReadTextResult, Reader, Span};
+use crate::utils::is_whitespace;
 
 /// A struct for read XML asynchronously from an [`AsyncBufRead`].
 ///
@@ -58,7 +58,7 @@ impl<R: AsyncBufRead + Unpin> Reader<R> {
     ///     match reader.read_event_into_async(&mut buf).await {
     ///         Ok(Event::Start(_)) => count += 1,
     ///         Ok(Event::Text(e)) => txt.push(e.unescape().unwrap().into_owned()),
-    ///         Err(e) => panic!("Error at position {}: {:?}", reader.buffer_position(), e),
+    ///         Err(e) => panic!("Error at position {}: {:?}", reader.error_position(), e),
     ///         Ok(Event::Eof) => break,
     ///         _ => (),
     ///     }
@@ -77,7 +77,6 @@ impl<R: AsyncBufRead + Unpin> Reader<R> {
         read_event_impl!(
             self, buf,
             TokioAdapter(&mut self.reader),
-            read_until_open_async,
             read_until_close_async,
             await
         )
@@ -139,17 +138,6 @@ impl<R: AsyncBufRead + Unpin> Reader<R> {
         buf: &mut Vec<u8>,
     ) -> Result<Span> {
         Ok(read_to_end!(self, end, buf, read_event_into_async, { buf.clear(); }, await))
-    }
-
-    /// Read until '<' is found, moves reader to an `OpenedTag` state and returns a `Text` event.
-    ///
-    /// Returns inner `Ok` if the loop should be broken and an event returned.
-    /// Returns inner `Err` with the same `buf` because Rust borrowck stumbles upon this case in particular.
-    async fn read_until_open_async<'b>(
-        &mut self,
-        buf: &'b mut Vec<u8>,
-    ) -> Result<std::result::Result<Event<'b>, &'b mut Vec<u8>>> {
-        read_until_open!(self, buf, TokioAdapter(&mut self.reader), read_event_into_async, await)
     }
 
     /// Private function to read until `>` is found. This function expects that
@@ -370,7 +358,7 @@ impl<R: AsyncBufRead + Unpin> NsReader<R> {
 #[cfg(test)]
 mod test {
     use super::TokioAdapter;
-    use crate::reader::test::{check, small_buffers};
+    use crate::reader::test::check;
 
     check!(
         #[tokio::test]
@@ -378,12 +366,6 @@ mod test {
         read_until_close_async,
         TokioAdapter,
         &mut Vec::new(),
-        async, await
-    );
-
-    small_buffers!(
-        #[tokio::test]
-        read_event_into_async: tokio::io::BufReader<_>,
         async, await
     );
 

@@ -2,10 +2,12 @@
 //!
 //! Name each module / test as `issue<GH number>` and keep sorted by issue number
 
+use std::io::BufReader;
+use std::iter;
 use std::sync::mpsc;
 
 use quick_xml::errors::{Error, IllFormedError, SyntaxError};
-use quick_xml::events::{BytesDecl, BytesStart, BytesText, Event};
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::name::QName;
 use quick_xml::reader::Reader;
 
@@ -254,4 +256,138 @@ fn issue622() {
         Err(Error::Syntax(cause)) => assert_eq!(cause, SyntaxError::UnclosedTag),
         x => panic!("Expected `Err(Syntax(_))`, but got `{:?}`", x),
     }
+}
+
+/// Regression test for https://github.com/tafia/quick-xml/issues/706
+#[test]
+fn issue706() {
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<?procinst-with-xml
+	<parameters>
+		<parameter id="version" value="0.1"/>
+		<parameter id="timeStamp" value="2024-01-16T10:44:00Z"/>
+	</parameters>
+?>
+<Document/>"#;
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Err(e) => panic!("Error at position {}: {:?}", reader.buffer_position(), e),
+            Ok(Event::Eof) => break,
+            _ => (),
+        }
+    }
+}
+
+/// Regression test for https://github.com/tafia/quick-xml/issues/751
+#[test]
+fn issue751() {
+    let mut text = Vec::new();
+    let mut chunk = Vec::new();
+    chunk.extend_from_slice(b"<content>");
+    for data in iter::repeat(b"some text inside").take(1000) {
+        chunk.extend_from_slice(data);
+        text.extend_from_slice(data);
+    }
+    chunk.extend_from_slice(b"</content>");
+
+    let mut reader = Reader::from_reader(quick_xml::utils::Fountain {
+        chunk: &chunk,
+        consumed: 0,
+        overall_read: 0,
+    });
+    let mut buf = Vec::new();
+    let mut starts = 0u64;
+    let mut ends = 0u64;
+    let mut texts = 0u64;
+    loop {
+        buf.clear();
+        match reader.read_event_into(&mut buf) {
+            Err(e) => panic!("Error at position {}: {:?}", reader.error_position(), e),
+            Ok(Event::Eof) => break,
+
+            Ok(Event::Start(e)) => {
+                starts += 1;
+                assert_eq!(
+                    e.name(),
+                    QName(b"content"),
+                    "starts: {starts}, ends: {ends}, texts: {texts}"
+                );
+            }
+            Ok(Event::End(e)) => {
+                ends += 1;
+                assert_eq!(
+                    e.name(),
+                    QName(b"content"),
+                    "starts: {starts}, ends: {ends}, texts: {texts}"
+                );
+            }
+            Ok(Event::Text(e)) => {
+                texts += 1;
+                assert_eq!(
+                    e.as_ref(),
+                    text,
+                    "starts: {starts}, ends: {ends}, texts: {texts}"
+                );
+            }
+            _ => (),
+        }
+        // If we successfully read more than `u32::MAX`, the test is passed
+        if reader.get_ref().overall_read >= u32::MAX as u64 {
+            break;
+        }
+    }
+}
+
+/// Regression test for https://github.com/tafia/quick-xml/issues/774
+///
+/// Capacity of the buffer selected in that way, that "text" will be read into
+/// one internal buffer of `BufReader` in one `fill_buf()` call and `<` of the
+/// closing tag in the next call.
+#[test]
+fn issue774() {
+    let xml = BufReader::with_capacity(9, b"<tag>text</tag>" as &[u8]);
+    //                                      ^0       ^9
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+
+    assert_eq!(
+        reader.read_event_into(&mut buf).unwrap(),
+        Event::Start(BytesStart::new("tag"))
+    );
+    assert_eq!(
+        reader.read_event_into(&mut buf).unwrap(),
+        Event::Text(BytesText::new("text"))
+    );
+    assert_eq!(
+        reader.read_event_into(&mut buf).unwrap(),
+        Event::End(BytesEnd::new("tag"))
+    );
+}
+
+/// Regression test for https://github.com/tafia/quick-xml/issues/776
+#[test]
+fn issue776() {
+    let mut reader = Reader::from_str(r#"<tag></tag/><tag></tag attr=">">"#);
+    // We still think that the name of the end tag is everything between `</` and `>`
+    // and if we do not disable this check we get error
+    reader.config_mut().check_end_names = false;
+
+    assert_eq!(
+        reader.read_event().unwrap(),
+        Event::Start(BytesStart::new("tag"))
+    );
+    assert_eq!(
+        reader.read_event().unwrap(),
+        Event::End(BytesEnd::new("tag/"))
+    );
+
+    assert_eq!(
+        reader.read_event().unwrap(),
+        Event::Start(BytesStart::new("tag"))
+    );
+    assert_eq!(
+        reader.read_event().unwrap(),
+        Event::End(BytesEnd::new(r#"tag attr=">""#))
+    );
 }

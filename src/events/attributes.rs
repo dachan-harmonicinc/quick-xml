@@ -2,11 +2,12 @@
 //!
 //! Provides an iterator over attributes key/value pairs
 
+use crate::encoding::Decoder;
 use crate::errors::Result as XmlResult;
-use crate::escape::{escape, unescape_with};
+use crate::escape::{escape, resolve_predefined_entity, unescape_with};
 use crate::name::QName;
-use crate::reader::{is_whitespace, Reader};
-use crate::utils::{write_byte_string, write_cow_string, Bytes};
+use crate::utils::{is_whitespace, write_byte_string, write_cow_string, Bytes};
+
 use std::fmt::{self, Debug, Display, Formatter};
 use std::iter::FusedIterator;
 use std::{borrow::Cow, ops::Range};
@@ -44,7 +45,7 @@ impl<'a> Attribute<'a> {
     /// [`encoding`]: ../../index.html#encoding
     #[cfg(any(doc, not(feature = "encoding")))]
     pub fn unescape_value(&self) -> XmlResult<Cow<'a, str>> {
-        self.unescape_value_with(|_| None)
+        self.unescape_value_with(resolve_predefined_entity)
     }
 
     /// Decodes using UTF-8 then unescapes the value, using custom entities.
@@ -62,46 +63,32 @@ impl<'a> Attribute<'a> {
     ///
     /// [`encoding`]: ../../index.html#encoding
     #[cfg(any(doc, not(feature = "encoding")))]
+    #[inline]
     pub fn unescape_value_with<'entity>(
         &self,
         resolve_entity: impl FnMut(&str) -> Option<&'entity str>,
     ) -> XmlResult<Cow<'a, str>> {
-        // from_utf8 should never fail because content is always UTF-8 encoded
-        let decoded = match &self.value {
-            Cow::Borrowed(bytes) => Cow::Borrowed(std::str::from_utf8(bytes)?),
-            // Convert to owned, because otherwise Cow will be bound with wrong lifetime
-            Cow::Owned(bytes) => Cow::Owned(std::str::from_utf8(bytes)?.to_string()),
-        };
-
-        match unescape_with(&decoded, resolve_entity)? {
-            // Because result is borrowed, no replacements was done and we can use original string
-            Cow::Borrowed(_) => Ok(decoded),
-            Cow::Owned(s) => Ok(s.into()),
-        }
+        self.decode_and_unescape_value_with(Decoder::utf8(), resolve_entity)
     }
 
     /// Decodes then unescapes the value.
     ///
     /// This will allocate if the value contains any escape sequences or in
     /// non-UTF-8 encoding.
-    pub fn decode_and_unescape_value<B>(&self, reader: &Reader<B>) -> XmlResult<Cow<'a, str>> {
-        self.decode_and_unescape_value_with(reader, |_| None)
+    pub fn decode_and_unescape_value(&self, decoder: Decoder) -> XmlResult<Cow<'a, str>> {
+        self.decode_and_unescape_value_with(decoder, resolve_predefined_entity)
     }
 
     /// Decodes then unescapes the value with custom entities.
     ///
     /// This will allocate if the value contains any escape sequences or in
     /// non-UTF-8 encoding.
-    pub fn decode_and_unescape_value_with<'entity, B>(
+    pub fn decode_and_unescape_value_with<'entity>(
         &self,
-        reader: &Reader<B>,
+        decoder: Decoder,
         resolve_entity: impl FnMut(&str) -> Option<&'entity str>,
     ) -> XmlResult<Cow<'a, str>> {
-        let decoded = match &self.value {
-            Cow::Borrowed(bytes) => reader.decoder().decode(bytes)?,
-            // Convert to owned, because otherwise Cow will be bound with wrong lifetime
-            Cow::Owned(bytes) => reader.decoder().decode(bytes)?.into_owned().into(),
-        };
+        let decoded = decoder.decode_cow(&self.value)?;
 
         match unescape_with(&decoded, resolve_entity)? {
             // Because result is borrowed, no replacements was done and we can use original string
@@ -195,7 +182,7 @@ pub struct Attributes<'a> {
 impl<'a> Attributes<'a> {
     /// Internal constructor, used by `BytesStart`. Supplies data in reader's encoding
     #[inline]
-    pub(crate) fn wrap(buf: &'a [u8], pos: usize, html: bool) -> Self {
+    pub(crate) const fn wrap(buf: &'a [u8], pos: usize, html: bool) -> Self {
         Self {
             bytes: buf,
             state: IterState::new(pos, html),
@@ -203,12 +190,12 @@ impl<'a> Attributes<'a> {
     }
 
     /// Creates a new attribute iterator from a buffer.
-    pub fn new(buf: &'a str, pos: usize) -> Self {
+    pub const fn new(buf: &'a str, pos: usize) -> Self {
         Self::wrap(buf.as_bytes(), pos, false)
     }
 
     /// Creates a new attribute iterator from a buffer, allowing HTML attribute syntax.
-    pub fn html(buf: &'a str, pos: usize) -> Self {
+    pub const fn html(buf: &'a str, pos: usize) -> Self {
         Self::wrap(buf.as_bytes(), pos, true)
     }
 
@@ -416,7 +403,7 @@ impl<T> Attr<T> {
 impl<'a> Attr<&'a [u8]> {
     /// Returns the key value
     #[inline]
-    pub fn key(&self) -> QName<'a> {
+    pub const fn key(&self) -> QName<'a> {
         QName(match self {
             Attr::DoubleQ(key, _) => key,
             Attr::SingleQ(key, _) => key,
@@ -429,7 +416,7 @@ impl<'a> Attr<&'a [u8]> {
     ///
     /// [HTML specification]: https://www.w3.org/TR/2012/WD-html-markup-20120329/syntax.html#syntax-attr-empty
     #[inline]
-    pub fn value(&self) -> &'a [u8] {
+    pub const fn value(&self) -> &'a [u8] {
         match self {
             Attr::DoubleQ(_, value) => value,
             Attr::SingleQ(_, value) => value,
@@ -518,7 +505,7 @@ pub(crate) struct IterState {
 }
 
 impl IterState {
-    pub fn new(offset: usize, html: bool) -> Self {
+    pub const fn new(offset: usize, html: bool) -> Self {
         Self {
             state: State::Next(offset),
             html,

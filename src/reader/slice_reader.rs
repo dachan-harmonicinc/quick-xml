@@ -3,16 +3,19 @@
 //! intermediate buffer as the byte slice itself can be used to borrow from.
 
 use std::borrow::Cow;
+use std::io;
 
 #[cfg(feature = "encoding")]
 use crate::reader::EncodingRef;
 #[cfg(feature = "encoding")]
 use encoding_rs::{Encoding, UTF_8};
 
-use crate::errors::{Error, Result, SyntaxError};
+use crate::errors::{Error, Result};
 use crate::events::Event;
 use crate::name::QName;
-use crate::reader::{is_whitespace, BangType, ReadElementState, Reader, Span, XmlSource};
+use crate::parser::Parser;
+use crate::reader::{BangType, ReadTextResult, Reader, Span, XmlSource};
+use crate::utils::is_whitespace;
 
 /// This is an implementation for reading from a `&[u8]` as underlying byte stream.
 /// This implementation supports not using an intermediate buffer as the byte slice
@@ -227,7 +230,10 @@ impl<'a> Reader<&'a [u8]> {
         let buffer = self.reader;
         let span = self.read_to_end(end)?;
 
-        self.decoder().decode(&buffer[0..span.len()])
+        let len = span.end - span.start;
+        // SAFETY: `span` can only contain indexes up to usize::MAX because it
+        // was created from offsets from a single &[u8] slice
+        self.decoder().decode(&buffer[0..len as usize])
     }
 }
 
@@ -237,7 +243,8 @@ impl<'a> Reader<&'a [u8]> {
 /// that will be borrowed by events. This implementation provides a zero-copy deserialization
 impl<'a> XmlSource<'a, ()> for &'a [u8] {
     #[cfg(not(feature = "encoding"))]
-    fn remove_utf8_bom(&mut self) -> Result<()> {
+    #[inline]
+    fn remove_utf8_bom(&mut self) -> io::Result<()> {
         if self.starts_with(crate::encoding::UTF8_BOM) {
             *self = &self[crate::encoding::UTF8_BOM.len()..];
         }
@@ -245,7 +252,8 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
     }
 
     #[cfg(feature = "encoding")]
-    fn detect_encoding(&mut self) -> Result<Option<&'static Encoding>> {
+    #[inline]
+    fn detect_encoding(&mut self) -> io::Result<Option<&'static Encoding>> {
         if let Some((enc, bom_len)) = crate::encoding::detect_encoding(self) {
             *self = &self[bom_len..];
             return Ok(Some(enc));
@@ -253,33 +261,48 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
         Ok(None)
     }
 
-    fn read_bytes_until(
-        &mut self,
-        byte: u8,
-        _buf: (),
-        position: &mut usize,
-    ) -> Result<(&'a [u8], bool)> {
-        // search byte must be within the ascii range
-        debug_assert!(byte.is_ascii());
-
-        if let Some(i) = memchr::memchr(byte, self) {
-            *position += i + 1;
-            let bytes = &self[..i];
-            *self = &self[i + 1..];
-            Ok((bytes, true))
-        } else {
-            *position += self.len();
-            let bytes = &self[..];
-            *self = &[];
-            Ok((bytes, false))
+    #[inline]
+    fn read_text(&mut self, _buf: (), position: &mut u64) -> ReadTextResult<'a, ()> {
+        match memchr::memchr(b'<', self) {
+            Some(0) => {
+                *position += 1;
+                *self = &self[1..];
+                ReadTextResult::Markup(())
+            }
+            Some(i) => {
+                *position += i as u64 + 1;
+                let bytes = &self[..i];
+                *self = &self[i + 1..];
+                ReadTextResult::UpToMarkup(bytes)
+            }
+            None => {
+                *position += self.len() as u64;
+                let bytes = &self[..];
+                *self = &[];
+                ReadTextResult::UpToEof(bytes)
+            }
         }
     }
 
-    fn read_bang_element(
-        &mut self,
-        _buf: (),
-        position: &mut usize,
-    ) -> Result<(BangType, &'a [u8])> {
+    #[inline]
+    fn read_with<P>(&mut self, mut parser: P, _buf: (), position: &mut u64) -> Result<&'a [u8]>
+    where
+        P: Parser,
+    {
+        if let Some(i) = parser.feed(self) {
+            // +1 for `>` which we do not include
+            *position += i as u64 + 1;
+            let bytes = &self[..i];
+            *self = &self[i + 1..];
+            return Ok(bytes);
+        }
+
+        *position += self.len() as u64;
+        Err(Error::Syntax(P::eof_error()))
+    }
+
+    #[inline]
+    fn read_bang_element(&mut self, _buf: (), position: &mut u64) -> Result<(BangType, &'a [u8])> {
         // Peeked one bang ('!') before being called, so it's guaranteed to
         // start with it.
         debug_assert_eq!(self[0], b'!');
@@ -287,52 +310,28 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
         let bang_type = BangType::new(self[1..].first().copied())?;
 
         if let Some((bytes, i)) = bang_type.parse(&[], self) {
-            *position += i;
+            *position += i as u64;
             *self = &self[i..];
             return Ok((bang_type, bytes));
         }
 
-        *position += self.len();
+        *position += self.len() as u64;
         Err(bang_type.to_err())
     }
 
-    fn read_element(&mut self, _buf: (), position: &mut usize) -> Result<&'a [u8]> {
-        let mut state = ReadElementState::Elem;
-
-        if let Some((bytes, i)) = state.change(self) {
-            // Position now just after the `>` symbol
-            *position += i;
-            *self = &self[i..];
-            return Ok(bytes);
-        }
-
-        *position += self.len();
-        Err(Error::Syntax(SyntaxError::UnclosedTag))
-    }
-
-    fn skip_whitespace(&mut self, position: &mut usize) -> Result<()> {
+    #[inline]
+    fn skip_whitespace(&mut self, position: &mut u64) -> io::Result<()> {
         let whitespaces = self
             .iter()
             .position(|b| !is_whitespace(*b))
             .unwrap_or(self.len());
-        *position += whitespaces;
+        *position += whitespaces as u64;
         *self = &self[whitespaces..];
         Ok(())
     }
 
-    fn skip_one(&mut self, byte: u8, position: &mut usize) -> Result<bool> {
-        // search byte must be within the ascii range
-        debug_assert!(byte.is_ascii());
-        if self.first() == Some(&byte) {
-            *self = &self[1..];
-            *position += 1;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn peek_one(&mut self) -> Result<Option<u8>> {
+    #[inline]
+    fn peek_one(&mut self) -> io::Result<Option<u8>> {
         Ok(self.first().copied())
     }
 }
@@ -354,25 +353,4 @@ mod test {
         identity,
         ()
     );
-
-    #[cfg(feature = "encoding")]
-    mod encoding {
-        use crate::events::Event;
-        use crate::reader::Reader;
-        use encoding_rs::UTF_8;
-        use pretty_assertions::assert_eq;
-
-        /// Checks that XML declaration cannot change the encoding from UTF-8 if
-        /// a `Reader` was created using `from_str` method
-        #[test]
-        fn str_always_has_utf8() {
-            let mut reader = Reader::from_str("<?xml encoding='UTF-16'?>");
-
-            assert_eq!(reader.decoder().encoding(), UTF_8);
-            reader.read_event().unwrap();
-            assert_eq!(reader.decoder().encoding(), UTF_8);
-
-            assert_eq!(reader.read_event().unwrap(), Event::Eof);
-        }
-    }
 }

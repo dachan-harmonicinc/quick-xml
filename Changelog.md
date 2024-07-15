@@ -1,14 +1,148 @@
-> Legend:
-  - feat: A new feature
-  - fix: A bug fix
-  - docs: Documentation only changes
-  - style: White-space, formatting, missing semi-colons, etc
-  - refactor: A code change that neither fixes a bug nor adds a feature
-  - perf: A code change that improves performance
-  - test: Adding missing tests
-  - chore: Changes to the build process or auxiliary tools/libraries/documentation
+> Release checklist (minimal list of actions for cutting a release):
+> 1. `$env:RUSTDOCFLAGS="--cfg docsrs"; cargo +nightly doc --all-features` and check generated documentation for missing / unclear things
+> 2. Update version in `Cargo.toml`
+> 3. Update `Changelog.md` with date of release, add new empty Unreleased headings
+> 4. Commit changes with message "Release x.y.z"
+> 5. `cargo package` for final check
+> 6. Push `master` to my fork, wait while CI pass. Repeat with force pushs if necessary
+> 7. `cargo publish`
+> 8. Create and push tag `vx.y.z` and push `master` to upstream
+> 9. Create a Release on GitHub (in GitHub UI)
+
+----------------------------------------------------------------------------------------------------
 
 ## Unreleased
+
+### New Features
+
+### Bug Fixes
+
+### Misc Changes
+
+
+## 0.36.0 -- 2024-07-08
+
+### Bug Fixes
+
+- [#781]: Fix conditions to start CDATA section. Only uppercase `<![CDATA[` can start it.
+  Previously any case was allowed.
+- [#780]: Fixed incorrect `.error_position()` when encountering syntax error for open or self-closed tag.
+
+### Misc Changes
+
+- [#780]: `reader::Parser`, `reader::ElementParser` and `reader::PiParser` moved to the new module `parser`.
+- [#776]: Allow to have attributes in the end tag for compatibility reasons with Adobe Flash XML parser.
+
+[#776]: https://github.com/tafia/quick-xml/issues/776
+[#780]: https://github.com/tafia/quick-xml/pull/780
+[#781]: https://github.com/tafia/quick-xml/pull/781
+
+
+## 0.35.0 -- 2024-06-29
+
+### New Features
+
+- [#772]: Add `reader::Config::allow_unmatched_ends` to permit dangling end tags
+
+### Bug Fixes
+
+- [#773]: Fixed reporting incorrect end position in `Reader::read_to_end` family
+  of methods and trimming of the trailing spaces in `Reader::read_text` when
+  `trim_text_start` is set and the last event is not a `Text` event.
+- [#771]: Character references now allow any number of leading zeroes as it should.
+  As a result, the following variants of `quick_xml::escape::EscapeError` are removed:
+  - `TooLongDecimal`
+  - `TooLongHexadecimal`
+- [#771]: Fixed `Attribute::unescape_value` which does not unescape predefined values since 0.32.0.
+- [#774]: Fixed regression since 0.33.0: `Text` event may be skipped in `read_event_into()`
+  and `read_event_into_async()` in some circumstances.
+
+### Misc Changes
+
+- [#771]: `EscapeError::UnrecognizedSymbol` renamed to `EscapeError::UnrecognizedEntity`.
+- [#771]: Implemented `PartialEq` for `EscapeError`.
+- [#771]: Replace the following variants of `EscapeError` by `InvalidCharRef` variant
+  with a new `ParseCharRefError` inside:
+  - `EntityWithNull`
+  - `InvalidDecimal`
+  - `InvalidHexadecimal`
+  - `InvalidCodepoint`
+
+[#771]: https://github.com/tafia/quick-xml/pull/771
+[#772]: https://github.com/tafia/quick-xml/pull/772
+[#773]: https://github.com/tafia/quick-xml/pull/773
+[#774]: https://github.com/tafia/quick-xml/issues/774
+
+
+## 0.34.0 -- 2024-06-25
+
+### Bug Fixes
+
+- [#751]: Fix internal overflow when read 4GB+ files on 32-bit targets using `Reader<impl BufRead>` readers.
+
+### Misc Changes
+
+- [#760]: `Attribute::decode_and_unescape_value` and `Attribute::decode_and_unescape_value_with` now
+  accepts `Decoder` instead of `Reader`. Use `Reader::decoder()` to get it.
+- [#760]: `Writer::write_event` now consumes event. Use `Event::borrow()` if you want to keep ownership.
+- [#751]: Type of `Reader::error_position()` and `Reader::buffer_position()` changed from `usize` to `u64`.
+- [#751]: Type alias `Span` changed from `Range<usize>` to `Range<u64>`.
+
+[#751]: https://github.com/tafia/quick-xml/issues/751
+[#760]: https://github.com/tafia/quick-xml/pull/760
+
+
+## 0.33.0 -- 2024-06-21
+
+### New Features
+
+- [#758]: Implemented `From<QName>` for `BytesStart` and `BytesEnd`.
+
+### Bug Fixes
+
+- [#755]: Fix incorrect missing of trimming all-space text events when
+  `trim_text_start = false` and `trim_text_end = true`.
+
+### Misc Changes
+
+- [#650]: Change the type of `Event::PI` to a new dedicated `BytesPI` type.
+- [#759]: Make `const` as much functions as possible:
+  - `resolve_html5_entity()`
+  - `resolve_predefined_entity()`
+  - `resolve_xml_entity()`
+  - `Attr::key()`
+  - `Attr::value()`
+  - `Attributes::html()`
+  - `Attributes::new()`
+  - `BytesDecl::from_start()`
+  - `Decoder::encoding()`
+  - `Deserializer::get_ref()`
+  - `IoReader::get_ref()`
+  - `LocalName::into_inner()`
+  - `Namespace::into_inner()`
+  - `NsReader::config()`
+  - `NsReader::prefixes()`
+  - `Prefix::into_inner()`
+  - `QName::into_inner()`
+  - `Reader::buffer_position()`
+  - `Reader::config()`
+  - `Reader::decoder()`
+  - `Reader::error_position()`
+  - `Reader::get_ref()`
+  - `SliceReader::get_ref()`
+  - `Writer::get_ref()`
+  - `Writer::new()`
+- [#763]: Hide `quick_xml::escape::resolve_html5_entity` under `escape-html` feature again.
+  This function has significant influence to the compilation time (10+ seconds or 5x times)
+
+[#650]: https://github.com/tafia/quick-xml/issues/650
+[#755]: https://github.com/tafia/quick-xml/pull/755
+[#758]: https://github.com/tafia/quick-xml/pull/758
+[#759]: https://github.com/tafia/quick-xml/pull/759
+[#763]: https://github.com/tafia/quick-xml/issues/763
+
+
+## 0.32.0 -- 2024-06-10
 
 The way to configure parser is changed. Now all configuration is contained in the
 `Config` struct and can be applied at once. When `serde-types` feature is enabled,
@@ -17,6 +151,9 @@ configuration is serializable.
 The method of reporting positions of errors has changed - use `error_position()`
 to get an offset of the error position. For `SyntaxError`s the range
 `error_position()..buffer_position()` also will represent a span of error.
+
+The way of resolve entities with `unescape_with` are changed. Those methods no longer
+resolve predefined entities.
 
 ### New Features
 
@@ -30,6 +167,17 @@ to get an offset of the error position. For `SyntaxError`s the range
 - [#362]: Added `BytesCData::minimal_escape()` which escapes only `&` and `<`.
 - [#362]: Added `Serializer::set_quote_level()` which allow to set desired level of escaping.
 - [#705]: Added `NsReader::prefixes()` to list all the prefixes currently declared.
+- [#629]: Added a default case to `impl_deserialize_for_internally_tagged_enum` macro so that
+  it can handle every attribute that does not match existing cases within an enum variant.
+- [#722]: Allow to pass owned strings to `Writer::create_element`. This is breaking change!
+- [#275]: Added `ElementWriter::new_line()` which enables pretty printing elements with multiple attributes.
+- [#743]: Added `Deserializer::get_ref()` to get XML Reader from serde Deserializer
+- [#734]: Added helper functions to resolve predefined XML and HTML5 entities:
+  - `quick_xml::escape::resolve_predefined_entity`
+  - `quick_xml::escape::resolve_xml_entity`
+  - `quick_xml::escape::resolve_html5_entity`
+- [#753]: Added parser for processing instructions: `quick_xml::reader::PiParser`.
+- [#754]: Added parser for elements: `quick_xml::reader::ElementParser`.
 
 ### Bug Fixes
 
@@ -37,6 +185,8 @@ to get an offset of the error position. For `SyntaxError`s the range
 - [#684]: Fix incorrect position reported for `Error::IllFormed(DoubleHyphenInComment)`.
 - [#684]: Fix incorrect position reported for `Error::IllFormed(MissingDoctypeName)`.
 - [#704]: Fix empty tags with attributes not being expanded when `expand_empty_elements` is set to true.
+- [#683]: Use local tag name when check tag name against possible names for field.
+- [#753]: Correctly determine end of processing instructions and XML declaration.
 
 ### Misc Changes
 
@@ -60,16 +210,36 @@ to get an offset of the error position. For `SyntaxError`s the range
 - [#362]: Now default quote level is `QuoteLevel::Partial` when using serde serializer.
 - [#689]: `buffer_position()` now always report the position the parser last seen.
   To get an error position use `error_position()`.
+- [#738]: Add an example of how to deserialize XML elements into Rust enums using an
+  intermediate custom deserializer.
+- [#748]: Implement `Clone` for [`DeEvent`], [`PayloadEvent`] and [`Text`].
+- [#734]: Rename `NoEntityResolver` to `PredefinedEntityResolver`.
+- [#734]: No longer resolve predefined entities (`lt`, `gt`, `apos`, `quot`, `amp`)
+  in `unescape_with` family of methods. You should do that by yourself using the methods
+  listed above.
 
+[#275]: https://github.com/tafia/quick-xml/issues/275
 [#362]: https://github.com/tafia/quick-xml/issues/362
 [#513]: https://github.com/tafia/quick-xml/issues/513
 [#622]: https://github.com/tafia/quick-xml/issues/622
+[#629]: https://github.com/tafia/quick-xml/issues/629
 [#675]: https://github.com/tafia/quick-xml/pull/675
 [#677]: https://github.com/tafia/quick-xml/pull/677
+[#683]: https://github.com/tafia/quick-xml/issues/683
 [#684]: https://github.com/tafia/quick-xml/pull/684
 [#689]: https://github.com/tafia/quick-xml/pull/689
 [#704]: https://github.com/tafia/quick-xml/pull/704
 [#705]: https://github.com/tafia/quick-xml/pull/705
+[#722]: https://github.com/tafia/quick-xml/pull/722
+[#734]: https://github.com/tafia/quick-xml/pull/734
+[#738]: https://github.com/tafia/quick-xml/pull/738
+[#743]: https://github.com/tafia/quick-xml/pull/743
+[#748]: https://github.com/tafia/quick-xml/pull/748
+[#753]: https://github.com/tafia/quick-xml/pull/753
+[#754]: https://github.com/tafia/quick-xml/pull/754
+[`DeEvent`]: https://docs.rs/quick-xml/latest/quick_xml/de/enum.DeEvent.html
+[`PayloadEvent`]: https://docs.rs/quick-xml/latest/quick_xml/de/enum.PayloadEvent.html
+[`Text`]: https://docs.rs/quick-xml/latest/quick_xml/de/struct.Text.html
 
 
 ## 0.31.0 -- 2023-10-22
@@ -619,6 +789,18 @@ serde >= 1.0.181
 [#456]: https://github.com/tafia/quick-xml/pull/456
 [#459]: https://github.com/tafia/quick-xml/pull/459
 [#467]: https://github.com/tafia/quick-xml/pull/467
+
+----------------------------------------------------------------------------------------------------
+
+> Legend:
+> - feat: A new feature
+> - fix: A bug fix
+> - docs: Documentation only changes
+> - style: White-space, formatting, missing semi-colons, etc
+> - refactor: A code change that neither fixes a bug nor adds a feature
+> - perf: A code change that improves performance
+> - test: Adding missing tests
+> - chore: Changes to the build process or auxiliary tools/libraries/documentation
 
 
 ## 0.23.1 -- 2022-09-11

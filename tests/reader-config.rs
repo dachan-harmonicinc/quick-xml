@@ -6,8 +6,56 @@
 //! Please keep tests sorted (exceptions are allowed if options are tightly related).
 
 use quick_xml::errors::{Error, IllFormedError};
-use quick_xml::events::{BytesCData, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::events::{BytesCData, BytesEnd, BytesPI, BytesStart, BytesText, Event};
 use quick_xml::reader::Reader;
+
+mod allow_unmatched_ends {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn false_() {
+        let mut reader = Reader::from_str("<tag></tag></unmatched>");
+        reader.config_mut().allow_unmatched_ends = false;
+
+        assert_eq!(
+            reader.read_event().unwrap(),
+            Event::Start(BytesStart::new("tag"))
+        );
+        assert_eq!(
+            reader.read_event().unwrap(),
+            Event::End(BytesEnd::new("tag"))
+        );
+        match reader.read_event() {
+            Err(Error::IllFormed(cause)) => {
+                assert_eq!(cause, IllFormedError::UnmatchedEndTag("unmatched".into()));
+            }
+            x => panic!("Expected `Err(IllFormed(_))`, but got `{:?}`", x),
+        }
+        assert_eq!(reader.read_event().unwrap(), Event::Eof);
+    }
+
+    #[test]
+    fn true_() {
+        let mut reader = Reader::from_str("<tag></tag></unmatched>");
+        reader.config_mut().allow_unmatched_ends = true;
+
+        assert_eq!(
+            reader.read_event().unwrap(),
+            Event::Start(BytesStart::new("tag"))
+        );
+        assert_eq!(
+            reader.read_event().unwrap(),
+            Event::End(BytesEnd::new("tag"))
+        );
+        // #770: We want to allow this
+        assert_eq!(
+            reader.read_event().unwrap(),
+            Event::End(BytesEnd::new("unmatched"))
+        );
+        assert_eq!(reader.read_event().unwrap(), Event::Eof);
+    }
+}
 
 mod check_comments {
     use super::*;
@@ -450,7 +498,7 @@ mod trim_markup_names_in_closing_tags {
 }
 
 const XML: &str = " \t\r\n\
-<!doctype root \t\r\n> \t\r\n\
+<!DOCTYPE root \t\r\n> \t\r\n\
 <root \t\r\n> \t\r\n\
     <empty \t\r\n/> \t\r\n\
     text \t\r\n\
@@ -520,7 +568,7 @@ mod trim_text {
 
         assert_eq!(
             reader.read_event().unwrap(),
-            Event::PI(BytesText::new("pi \t\r\n"))
+            Event::PI(BytesPI::new("pi \t\r\n"))
         );
         assert_eq!(
             reader.read_event().unwrap(),
@@ -570,7 +618,7 @@ mod trim_text {
         );
         assert_eq!(
             reader.read_event().unwrap(),
-            Event::PI(BytesText::new("pi \t\r\n"))
+            Event::PI(BytesPI::new("pi \t\r\n"))
         );
         assert_eq!(
             reader.read_event().unwrap(),
@@ -641,7 +689,7 @@ mod trim_text_start {
 
         assert_eq!(
             reader.read_event().unwrap(),
-            Event::PI(BytesText::new("pi \t\r\n"))
+            Event::PI(BytesPI::new("pi \t\r\n"))
         );
         assert_eq!(
             reader.read_event().unwrap(),
@@ -691,7 +739,7 @@ mod trim_text_start {
         );
         assert_eq!(
             reader.read_event().unwrap(),
-            Event::PI(BytesText::new("pi \t\r\n"))
+            Event::PI(BytesPI::new("pi \t\r\n"))
         );
         assert_eq!(
             reader.read_event().unwrap(),
@@ -762,7 +810,7 @@ mod trim_text_end {
 
         assert_eq!(
             reader.read_event().unwrap(),
-            Event::PI(BytesText::new("pi \t\r\n"))
+            Event::PI(BytesPI::new("pi \t\r\n"))
         );
         assert_eq!(
             reader.read_event().unwrap(),
@@ -814,7 +862,7 @@ mod trim_text_end {
         );
         assert_eq!(
             reader.read_event().unwrap(),
-            Event::PI(BytesText::new("pi \t\r\n"))
+            Event::PI(BytesPI::new("pi \t\r\n"))
         );
         assert_eq!(
             reader.read_event().unwrap(),

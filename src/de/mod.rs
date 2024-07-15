@@ -1997,7 +1997,7 @@ mod text;
 mod var;
 
 pub use crate::errors::serialize::DeError;
-pub use resolver::{EntityResolver, NoEntityResolver};
+pub use resolver::{EntityResolver, PredefinedEntityResolver};
 
 use crate::{
     de::map::ElementMapAccess,
@@ -2026,11 +2026,14 @@ pub(crate) const VALUE_KEY: &str = "$value";
 /// events. _Consequent_ means that events should follow each other or be
 /// delimited only by (any count of) [`Comment`] or [`PI`] events.
 ///
+/// Internally text is stored in `Cow<str>`. Cloning of text is cheap while it
+/// is borrowed and makes copies of data when it is owned.
+///
 /// [`Text`]: Event::Text
 /// [`CData`]: Event::CData
 /// [`Comment`]: Event::Comment
 /// [`PI`]: Event::PI
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Text<'a> {
     text: Cow<'a, str>,
 }
@@ -2056,7 +2059,7 @@ impl<'a> From<&'a str> for Text<'a> {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Simplified event which contains only these variants that used by deserializer
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeEvent<'a> {
     /// Start tag (with attributes) `<tag attr="value">`.
     Start(BytesStart<'a>),
@@ -2088,7 +2091,7 @@ pub enum DeEvent<'a> {
 ///
 /// [`Text`]: Event::Text
 /// [`CData`]: Event::CData
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PayloadEvent<'a> {
     /// Start tag (with attributes) `<tag attr="value">`.
     Start(BytesStart<'a>),
@@ -2122,7 +2125,7 @@ impl<'a> PayloadEvent<'a> {
 /// An intermediate reader that consumes [`PayloadEvent`]s and produces final [`DeEvent`]s.
 /// [`PayloadEvent::Text`] events, that followed by any event except
 /// [`PayloadEvent::Text`] or [`PayloadEvent::CData`], are trimmed from the end.
-struct XmlReader<'i, R: XmlRead<'i>, E: EntityResolver = NoEntityResolver> {
+struct XmlReader<'i, R: XmlRead<'i>, E: EntityResolver = PredefinedEntityResolver> {
     /// A source of low-level XML events
     reader: R,
     /// Intermediate event, that could be returned by the next call to `next()`.
@@ -2132,9 +2135,9 @@ struct XmlReader<'i, R: XmlRead<'i>, E: EntityResolver = NoEntityResolver> {
     lookahead: Result<PayloadEvent<'i>, DeError>,
 
     /// Used to resolve unknown entities that would otherwise cause the parser
-    /// to return an [`EscapeError::UnrecognizedSymbol`] error.
+    /// to return an [`EscapeError::UnrecognizedEntity`] error.
     ///
-    /// [`EscapeError::UnrecognizedSymbol`]: crate::escape::EscapeError::UnrecognizedSymbol
+    /// [`EscapeError::UnrecognizedEntity`]: crate::escape::EscapeError::UnrecognizedEntity
     entity_resolver: E,
 }
 
@@ -2152,7 +2155,7 @@ impl<'i, R: XmlRead<'i>, E: EntityResolver> XmlReader<'i, R, E> {
     }
 
     /// Returns `true` if all events was consumed
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         matches!(self.lookahead, Ok(PayloadEvent::Eof))
     }
 
@@ -2162,8 +2165,9 @@ impl<'i, R: XmlRead<'i>, E: EntityResolver> XmlReader<'i, R, E> {
         replace(&mut self.lookahead, self.reader.next())
     }
 
+    /// Returns `true` when next event is not a text event in any form.
     #[inline(always)]
-    fn need_trim_end(&self) -> bool {
+    const fn current_event_is_last_text(&self) -> bool {
         // If next event is a text or CDATA, we should not trim trailing spaces
         !matches!(
             self.lookahead,
@@ -2179,43 +2183,27 @@ impl<'i, R: XmlRead<'i>, E: EntityResolver> XmlReader<'i, R, E> {
     /// [`CData`]: PayloadEvent::CData
     fn drain_text(&mut self, mut result: Cow<'i, str>) -> Result<DeEvent<'i>, DeError> {
         loop {
-            match self.lookahead {
-                Ok(PayloadEvent::Text(_) | PayloadEvent::CData(_)) => {
-                    let text = self.next_text()?;
+            if self.current_event_is_last_text() {
+                break;
+            }
 
-                    let mut s = result.into_owned();
-                    s += &text;
-                    result = Cow::Owned(s);
+            match self.next_impl()? {
+                PayloadEvent::Text(mut e) => {
+                    if self.current_event_is_last_text() {
+                        // FIXME: Actually, we should trim after decoding text, but now we trim before
+                        e.inplace_trim_end();
+                    }
+                    result
+                        .to_mut()
+                        .push_str(&e.unescape_with(|entity| self.entity_resolver.resolve(entity))?);
                 }
-                _ => break,
+                PayloadEvent::CData(e) => result.to_mut().push_str(&e.decode()?),
+
+                // SAFETY: current_event_is_last_text checks that event is Text or CData
+                _ => unreachable!("Only `Text` and `CData` events can come here"),
             }
         }
         Ok(DeEvent::Text(Text { text: result }))
-    }
-
-    /// Read one text event, panics if current event is not a text event
-    ///
-    /// |Event                  |XML                        |Handling
-    /// |-----------------------|---------------------------|----------------------------------------
-    /// |[`PayloadEvent::Start`]|`<tag>...</tag>`           |Possible panic (unreachable)
-    /// |[`PayloadEvent::End`]  |`</any-tag>`               |Possible panic (unreachable)
-    /// |[`PayloadEvent::Text`] |`text content`             |Unescapes `text content` and returns it
-    /// |[`PayloadEvent::CData`]|`<![CDATA[cdata content]]>`|Returns `cdata content` unchanged
-    /// |[`PayloadEvent::Eof`]  |                           |Possible panic (unreachable)
-    #[inline(always)]
-    fn next_text(&mut self) -> Result<Cow<'i, str>, DeError> {
-        match self.next_impl()? {
-            PayloadEvent::Text(mut e) => {
-                if self.need_trim_end() {
-                    e.inplace_trim_end();
-                }
-                Ok(e.unescape_with(|entity| self.entity_resolver.resolve(entity))?)
-            }
-            PayloadEvent::CData(e) => Ok(e.decode()?),
-
-            // SAFETY: this method is called only when we peeked Text or CData
-            _ => unreachable!("Only `Text` and `CData` events can come here"),
-        }
     }
 
     /// Return an input-borrowing event.
@@ -2225,7 +2213,8 @@ impl<'i, R: XmlRead<'i>, E: EntityResolver> XmlReader<'i, R, E> {
                 PayloadEvent::Start(e) => Ok(DeEvent::Start(e)),
                 PayloadEvent::End(e) => Ok(DeEvent::End(e)),
                 PayloadEvent::Text(mut e) => {
-                    if self.need_trim_end() && e.inplace_trim_end() {
+                    if self.current_event_is_last_text() && e.inplace_trim_end() {
+                        // FIXME: Actually, we should trim after decoding text, but now we trim before
                         continue;
                     }
                     self.drain_text(e.unescape_with(|entity| self.entity_resolver.resolve(entity))?)
@@ -2353,7 +2342,7 @@ where
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// A structure that deserializes XML into Rust values.
-pub struct Deserializer<'de, R, E: EntityResolver = NoEntityResolver>
+pub struct Deserializer<'de, R, E: EntityResolver = PredefinedEntityResolver>
 where
     R: XmlRead<'de>,
 {
@@ -2431,6 +2420,38 @@ where
             return self.reader.is_empty();
         }
         false
+    }
+
+    /// Returns the underlying XML reader.
+    ///
+    /// ```
+    /// # use pretty_assertions::assert_eq;
+    /// use serde::Deserialize;
+    /// use quick_xml::de::Deserializer;
+    /// use quick_xml::Reader;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct SomeStruct {
+    ///     field1: String,
+    ///     field2: String,
+    /// }
+    ///
+    /// // Try to deserialize from broken XML
+    /// let mut de = Deserializer::from_str(
+    ///     "<SomeStruct><field1><field2></SomeStruct>"
+    /// //   0                           ^= 28        ^= 41
+    /// );
+    ///
+    /// let err = SomeStruct::deserialize(&mut de);
+    /// assert!(err.is_err());
+    ///
+    /// let reader: &Reader<_> = de.get_ref().get_ref();
+    ///
+    /// assert_eq!(reader.error_position(), 28);
+    /// assert_eq!(reader.buffer_position(), 41);
+    /// ```
+    pub const fn get_ref(&self) -> &R {
+        &self.reader.reader
     }
 
     /// Set the maximum number of events that could be skipped during deserialization
@@ -2764,7 +2785,7 @@ impl<'de> Deserializer<'de, SliceReader<'de>> {
     /// Deserializer created with this method will not resolve custom entities.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(source: &'de str) -> Self {
-        Self::from_str_with_resolver(source, NoEntityResolver)
+        Self::from_str_with_resolver(source, PredefinedEntityResolver)
     }
 }
 
@@ -2802,7 +2823,7 @@ where
     ///
     /// Deserializer created with this method will not resolve custom entities.
     pub fn from_reader(reader: R) -> Self {
-        Self::with_resolver(reader, NoEntityResolver)
+        Self::with_resolver(reader, PredefinedEntityResolver)
     }
 }
 
@@ -3062,6 +3083,41 @@ pub struct IoReader<R: BufRead> {
     buf: Vec<u8>,
 }
 
+impl<R: BufRead> IoReader<R> {
+    /// Returns the underlying XML reader.
+    ///
+    /// ```
+    /// # use pretty_assertions::assert_eq;
+    /// use serde::Deserialize;
+    /// use std::io::Cursor;
+    /// use quick_xml::de::Deserializer;
+    /// use quick_xml::Reader;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct SomeStruct {
+    ///     field1: String,
+    ///     field2: String,
+    /// }
+    ///
+    /// // Try to deserialize from broken XML
+    /// let mut de = Deserializer::from_reader(Cursor::new(
+    ///     "<SomeStruct><field1><field2></SomeStruct>"
+    /// //   0                           ^= 28        ^= 41
+    /// ));
+    ///
+    /// let err = SomeStruct::deserialize(&mut de);
+    /// assert!(err.is_err());
+    ///
+    /// let reader: &Reader<Cursor<&str>> = de.get_ref().get_ref();
+    ///
+    /// assert_eq!(reader.error_position(), 28);
+    /// assert_eq!(reader.buffer_position(), 41);
+    /// ```
+    pub const fn get_ref(&self) -> &Reader<R> {
+        &self.reader
+    }
+}
+
 impl<'i, R: BufRead> XmlRead<'i> for IoReader<R> {
     fn next(&mut self) -> Result<PayloadEvent<'static>, DeError> {
         loop {
@@ -3093,6 +3149,40 @@ impl<'i, R: BufRead> XmlRead<'i> for IoReader<R> {
 pub struct SliceReader<'de> {
     reader: Reader<&'de [u8]>,
     start_trimmer: StartTrimmer,
+}
+
+impl<'de> SliceReader<'de> {
+    /// Returns the underlying XML reader.
+    ///
+    /// ```
+    /// # use pretty_assertions::assert_eq;
+    /// use serde::Deserialize;
+    /// use quick_xml::de::Deserializer;
+    /// use quick_xml::Reader;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct SomeStruct {
+    ///     field1: String,
+    ///     field2: String,
+    /// }
+    ///
+    /// // Try to deserialize from broken XML
+    /// let mut de = Deserializer::from_str(
+    ///     "<SomeStruct><field1><field2></SomeStruct>"
+    /// //   0                           ^= 28        ^= 41
+    /// );
+    ///
+    /// let err = SomeStruct::deserialize(&mut de);
+    /// assert!(err.is_err());
+    ///
+    /// let reader: &Reader<&[u8]> = de.get_ref().get_ref();
+    ///
+    /// assert_eq!(reader.error_position(), 28);
+    /// assert_eq!(reader.buffer_position(), 41);
+    /// ```
+    pub const fn get_ref(&self) -> &Reader<&'de [u8]> {
+        &self.reader
+    }
 }
 
 impl<'de> XmlRead<'de> for SliceReader<'de> {

@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use quick_xml::events::{BytesCData, BytesText, Event};
+use quick_xml::events::{BytesCData, BytesPI, BytesText, Event};
 use quick_xml::reader::{Config, NsReader, Reader};
 use quick_xml::writer::Writer;
 use std::{hint::black_box, io::Cursor};
@@ -51,7 +51,7 @@ fn fuzz_round_trip(driver: Driver) -> quick_xml::Result<()> {
         // TODO: Handle error cases.
         use WriterFunc::*;
         match writer_func {
-            WriteEvent(event) => writer.write_event(event)?,
+            WriteEvent(event) => writer.write_event(event.borrow())?,
             WriteBom => writer.write_bom()?,
             WriteIndent => writer.write_indent()?,
             CreateElement {
@@ -60,7 +60,7 @@ fn fuzz_round_trip(driver: Driver) -> quick_xml::Result<()> {
                 attributes,
             } => {
                 let element_writer = writer
-                    .create_element(&name)
+                    .create_element(name)
                     .with_attributes(attributes.into_iter().copied());
                 use ElementWriterFunc::*;
                 match func {
@@ -71,7 +71,7 @@ fn fuzz_round_trip(driver: Driver) -> quick_xml::Result<()> {
                         _ = element_writer.write_cdata_content(BytesCData::new(*text))?;
                     }
                     WritePiContent(text) => {
-                        _ = element_writer.write_pi_content(BytesText::from_escaped(*text))?;
+                        _ = element_writer.write_pi_content(BytesPI::new(*text))?;
                     }
                     WriteEmpty => {
                         _ = element_writer.write_empty()?;
